@@ -8,7 +8,6 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-// ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID || "pushserver-ff2b4",
@@ -21,7 +20,6 @@ const db = admin.firestore();
 
 console.log("SmartBite Push Server & Firebase Initialized Successfully!");
 
-// হেল্পার ফাংশনসমূহ
 function isValidAppId(appId) {
   return appId && typeof appId === 'string' && appId.trim().length > 0;
 }
@@ -34,10 +32,8 @@ function tokenDocId(token) {
   return Buffer.from(token).toString('base64').replace(/[/+=]/g, '_');
 }
 
-// ── টোকেন রেজিস্টার এন্ডপয়েন্ট ──
 app.post('/register-token', async (req, res) => {
   const { token, appId, userAgent } = req.body;
-  
   if (!token) return res.status(400).json({ success: false, error: 'token required' });
   const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
 
@@ -50,15 +46,12 @@ app.post('/register-token', async (req, res) => {
       updatedAt: Date.now()
     }, { merge: true });
 
-    console.log(`[${targetAppId}] Token registered successfully`);
     res.json({ success: true, message: 'Token registered successfully.' });
   } catch (e) {
-    console.error('Register error:', e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ── টোকেন লিস্ট দেখার এন্ডপয়েন্ট ──
 app.get('/tokens', async (req, res) => {
   const { appId } = req.query;
   const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
@@ -76,33 +69,83 @@ app.get('/tokens', async (req, res) => {
   }
 });
 
-// ── নির্দিষ্ট টোকেনে নোটিফিকেশন পাঠানোর এন্ডপয়েন্ট ──
 app.post('/send-notification', async (req, res) => {
   const { token, title, body, imageUrl } = req.body;
   if (!token) return res.status(400).json({ success: false, error: 'token required' });
 
   try {
-    const t = title || 'Notification';
-    const b = body || '';
-
     const message = {
       token,
-      data: { title: t, body: b, ...(imageUrl ? { imageUrl } : {}) },
+      data: { title: title || 'Notification', body: body || '', ...(imageUrl ? { imageUrl } : {}) },
       android: { priority: 'high' }
     };
 
     const msgId = await admin.messaging().send(message);
     res.json({ success: true, messageId: msgId });
   } catch (e) {
-    console.error('Send error:', e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ── সকল টোকেনে ব্রডকাস্ট করার এন্ডপয়েন্ট ──
 app.post('/send-all', async (req, res) => {
   const { appId, title, body, imageUrl } = req.body;
   const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
+
+  try {
+    const snap = await devicesRef(targetAppId).get();
+    if (snap.empty) {
+      return res.status(200).json({ success: false, error: 'No tokens found for this app' });
+    }
+
+    const tokens = snap.docs.map(d => d.data().token).filter(Boolean);
+    const messages = tokens.map(token => ({
+      token,
+      data: { title: title || 'Notification', body: body || '', ...(imageUrl ? { imageUrl } : {}) },
+      android: { priority: 'high' }
+    }));
+
+    const result = await admin.messaging().sendEach(messages);
+    
+    const batch = db.batch();
+    let removed = 0;
+    result.responses.forEach((r, i) => {
+      if (!r.success) { 
+        batch.delete(snap.docs[i].ref); 
+        removed++; 
+      }
+    });
+    if (removed > 0) await batch.commit();
+
+    res.json({
+      success: true,
+      appId: targetAppId,
+      total: tokens.length,
+      successCount: result.successCount,
+      failureCount: result.failureCount
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.delete('/token', async (req, res) => {
+  const { appId, token } = req.query;
+  const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
+  
+  if (!token) return res.status(400).json({ success: false, error: 'token required' });
+
+  try {
+    await devicesRef(targetAppId).doc(tokenDocId(token)).delete();
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 7860;
+app.listen(PORT, () => {
+  console.log(`SmartBite Push Server is running on port ${PORT}`);
+});
 
   try {
     const snap = await devicesRef(targetAppId).get();
