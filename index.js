@@ -1,7 +1,7 @@
-const express = require('express');
-const admin = require('firebase-admin');
-const bodyParser = require('body-parser');
-const cors = require('cors');
+import express from 'express';
+import admin from 'firebase-admin';
+import bodyParser from 'body-parser';
+import cors from 'cors';
 
 const app = express();
 app.use(cors());
@@ -19,7 +19,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-console.log("Wevlo Push Server & Firebase Initialized Successfully!");
+console.log("SmartBite Push Server & Firebase Initialized Successfully!");
 
 // হেল্পার ফাংশনসমূহ
 function isValidAppId(appId) {
@@ -103,6 +103,70 @@ app.post('/send-notification', async (req, res) => {
 app.post('/send-all', async (req, res) => {
   const { appId, title, body, imageUrl } = req.body;
   const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
+
+  try {
+    const snap = await devicesRef(targetAppId).get();
+    if (snap.empty) {
+      return res.json({ success: false, error: 'No tokens found for this app' });
+    }
+
+    const tokens = snap.docs.map(d => d.data().token).filter(Boolean);
+    const t = title || 'Notification';
+    const b = body || '';
+    
+    const messages = tokens.map(token => ({
+      token,
+      data: { title: t, body: b, ...(imageUrl ? { imageUrl } : {}) },
+      android: { priority: 'high' }
+    }));
+
+    const result = await admin.messaging().sendEach(messages);
+    console.log(`[${targetAppId}] Sent: ${result.successCount} ok, ${result.failureCount} failed`);
+
+    const batch = db.batch();
+    let removed = 0;
+    result.responses.forEach((r, i) => {
+      if (!r.success) { 
+        batch.delete(snap.docs[i].ref); 
+        removed++; 
+      }
+    });
+    if (removed > 0) await batch.commit();
+
+    res.json({
+      success: true,
+      appId: targetAppId,
+      total: tokens.length,
+      successCount: result.successCount,
+      failureCount: result.failureCount
+    });
+  } catch (e) {
+    console.error('Send-all error:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── টোকেন ডিলিট করার এন্ডপয়েন্ট ──
+app.delete('/token', async (req, res) => {
+  const { appId, token } = req.query;
+  const targetAppId = isValidAppId(appId) ? appId : 'com.push.test';
+  
+  if (!token) return res.status(400).json({ success: false, error: 'token required' });
+
+  try {
+    await devicesRef(targetAppId).doc(tokenDocId(token)).delete();
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Delete error:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// সার্ভার পোর্ট সেটআপ
+const PORT = process.env.PORT || 7860;
+app.listen(PORT, () => {
+  console.log(`SmartBite Push Server is running on port ${PORT}`);
+});
 
   try {
     const snap = await devicesRef(targetAppId).get();
