@@ -1,108 +1,77 @@
-const express     = require('express');
-const admin       = require('firebase-admin');
-const bodyParser  = require('body-parser');
-const cors        = require('cors');
+const express = require('express');
+const admin = require('firebase-admin');
+const bodyParser = require('body-parser');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use(express.static('public'));
 
-// ── Firebase Admin initialize ──
-const serviceAccount = require('./serviceAccountKey.json');
+// ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন (অটো-ফরম্যাট করা ইঞ্জিনিয়ারিং কোড)
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID || "pushserver-ff2b4",
+    privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+    clientEmail: "firebase-adminsdk-8g4s1@pushserver-ff2b4.iam.gserviceaccount.com"
+  })
 });
 
-const db = admin.firestore();
+console.log("SmartBite Push Server & Firebase Initialized Successfully!");
 
-// ════════════════════════════════════════════════════════════
-// HELPERS
-// ════════════════════════════════════════════════════════════
+// ডিভাইস টোকেন সেভ করার জন্য স্টোরেজ
+let registeredTokens = new Set();
 
-function isValidAppId(appId) {
-  return appId && /^[a-zA-Z0-9._\-]{3,100}$/.test(appId);
-}
-
-function tokenDocId(token) {
-  return token.replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
-}
-
-function devicesRef(appId) {
-  return db.collection('push_tokens').doc(appId).collection('devices');
-}
-
-function appMetaRef(appId) {
-  return db.collection('push_app_meta').doc(appId);
-}
-
-// ════════════════════════════════════════════════════════════
-// ROUTES
-// ════════════════════════════════════════════════════════════
-
-app.get('/', (req, res) => {
-  res.send('Wevlo Push Notification Server is Running!');
+// টোকেন রেজিস্টার এন্ডপয়েন্ট
+app.post('/register-token', (req, res) => {
+  const { token } = req.body;
+  if (token) {
+    registeredTokens.add(token);
+    console.log('Token Registered:', token);
+    return res.status(200).json({ success: true, message: 'Token registered successfully.' });
+  }
+  return res.status(400).json({ success: false, message: 'Token is missing.' });
 });
 
-// ── Debug: দেখো এখন সার্ভারে কোন credential লোড হয়েছে ──
-// GET /debug
-app.get('/debug', (req, res) => {
-  res.json({
-    project_id:      serviceAccount.project_id,
-    client_email:    serviceAccount.client_email,
-    private_key_id:  serviceAccount.private_key_id,
-    private_key_len: (serviceAccount.private_key || '').length
-  });
-});
+// নির্দিষ্ট বা সকল ডিভাইসে নোটিফিকেশন পাঠানোর এন্ডপয়েন্ট
+app.post('/send-notification', async (req, res) => {
+  const { title, body, token } = req.body;
 
-// ── Debug: appId রেজিস্টার্ড আছে কিনা এবং কয়টা token আছে ──
-// GET /app-status?appId=com.myapp.xyz
-app.get('/app-status', async (req, res) => {
-  const { appId } = req.query;
-  if (!isValidAppId(appId)) return res.status(400).json({ success: false, error: 'valid appId required' });
+  if (!title || !body) {
+    return res.status(400).json({ success: false, message: 'Title and body are required.' });
+  }
 
   try {
-    const metaDoc  = await appMetaRef(appId).get();
-    const tokenSnap = await devicesRef(appId).get();
-    res.json({
-      success:      true,
-      appId,
-      registered:   metaDoc.exists,
-      registeredAt: metaDoc.exists ? metaDoc.data().registeredAt : null,
-      tokenCount:   tokenSnap.size
-    });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    let response;
+    if (token) {
+      const message = {
+        notification: { title, body },
+        token: token
+      };
+      response = await admin.messaging().send(message);
+    } else {
+      const tokensArray = Array.from(registeredTokens);
+      if (tokensArray.length === 0) {
+        return res.status(400).json({ success: false, message: 'No registered devices found.' });
+      }
+      const message = {
+        notification: { title, body },
+        tokens: tokensArray
+      };
+      response = await admin.messaging().sendEachForMulticast(message);
+    }
+
+    res.status(200).json({ success: true, response });
+  } catch (error) {
+    console.error('Error sending notification:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ── Register App (APK build থেকে password সেট হয়) ──
-// POST /register-app  { appId, password }
-app.post('/register-app', async (req, res) => {
-  const { appId } = req.body;
-  if (!isValidAppId(appId)) return res.status(400).json({ success: false, error: 'valid appId required' });
-
-  try {
-    const ref = appMetaRef(appId);
-    const doc = await ref.get();
-
-    await ref.set({
-      appId,
-      registeredAt: doc.exists ? doc.data().registeredAt : Date.now(),
-      updatedAt:    Date.now()
-    }, { merge: true });
-
-    console.log(`[${appId}] App registered/updated`);
-    res.json({ success: true, message: 'app registered' });
-  } catch (e) {
-    console.error('Register-app error:', e.message);
-    res.status(500).json({ success: false, error: e.message });
-  }
+const PORT = process.env.PORT || 7860;
+app.listen(PORT, () => {
+  console.log(`SmartBite Push Server is running on port ${PORT}`);
 });
-
-// ── Register Token (APK থেকে আসে) ──
-// POST /register-token  { token, appId, userAgent?, password? }
-app.post('/register-token', async (req, res) => {
-  const { token, appId, userAgent } = req.body;
 
   if (!token)               return res.status(400).json({ success: false, error: 'token required' });
   if (!isValidAppId(appId)) return res.status(400).json({ success: false, error: 'valid appId required' });
